@@ -48,7 +48,7 @@ jobs:
 
       - name: Tester la build Docker
         run: |
-          docker build -t monapp:test .
+          docker build -t monapp:test .github/workflows/D
           echo "✔ Dockerfile build OK."
 
       - name: Analyse Dockerfile avec Hadolint
