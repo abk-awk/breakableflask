@@ -1,1 +1,5 @@
-
+cryptography==44.0.1
+psycopg2-binary==2.6.2
+pymysql==1.1.1
+pymssql==2.1.1
+cx-Oracle==5.3
