@@ -1,4 +1,4 @@
-name: CI Pipeline
+name: Vulnerability Pipeline checking 
 
 on:
   push:
