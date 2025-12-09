@@ -1,23 +1,89 @@
-name: Automatisation des tests DevSecOps
-on: push
+name: CI Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
 jobs:
   Dependances:
+    name: Vérification et installation des dépendances
     runs-on: ubuntu-latest
     steps:
-      - name: Dependances
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Vérifier que requirements.txt existe
         run: |
-          echo "ecrire ici le scrypt de contrôle des dépendances"
+          if [ ! -f "requirements.txt" ]; then
+            echo "requirements.txt manquant !"
+            exit 1
+          fi
+          echo "✓ requirements.txt trouvé"
+
+      - name: Vérifier que requirements.txt n'est pas vide
+        run: |
+          if [ ! -s "requirements.txt" ]; then
+            echo "requirements.txt est vide !"
+            exit 1
+          fi
+          echo "✓ requirements.txt non vide"
+
+      - name: Tester l'installation des dépendances
+        run: |
+          pip install -r requirements.txt
+          echo "✓ Dépendances installables"
+
   Dockerfile:
+    name: Vérification et construction Docker
     runs-on: ubuntu-latest
     needs: Dependances
     steps:
-      - name: Test Dockerfile
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Vérifier que Dockerfile existe
         run: |
-          echo "ecrire ici le scrypt de contrôle du Dockerfile"
-  Deploy:
+          if [ ! -f "Dockerfile" ]; then
+            echo "Dockerfile manquant !"
+            exit 1
+          fi
+          echo "✓ Dockerfile trouvé"
+
+      - name: Tester la construction Docker
+        run: |
+          docker build -t imgvulne:1.1 .
+          echo "✓ Dockerfile OK — image Docker construite"
+
+  Vulnerabilities:
+    name: Scan des vulnérabilités
     runs-on: ubuntu-latest
     needs: Dockerfile
     steps:
-      - name: Deploy
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Installer jq et column pour formatage
+        run: sudo apt-get update && sudo apt-get install -y jq bsdmainutils
+
+      - name: Scanner vulnérabilités des dépendances Python
         run: |
-          echo "Rien à faire ici. Votre application est prête à être déployée"
+          echo "🔍 Scan des vulnérabilités dans requirements.txt"
+          docker run --rm \
+            -v "$PWD":/project \
+            -v $HOME/.cache/trivy:/root/.cache/ \
+            aquasec/trivy:latest fs /project/requirements.txt || echo "Scan terminé avec vulnérabilités"
+
+      - name: Scanner vulnérabilités de l'image Docker
+        run: |
+          echo "🔍 Scan des vulnérabilités dans l'image Docker imgvulne:1.1"
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$HOME/.cache/trivy":/root/.cache/ \
+            aquasec/trivy:latest image --format json --severity HIGH,CRITICAL imgvulne:1.1 \
+          | jq -r '
+            ["TARGET","PACKAGE","INSTALLED","VULN","SEVERITY"],
+            (.Results[]? as $r | $r.Vulnerabilities[]? | [$r.Target, .PkgName, .InstalledVersion, .VulnerabilityID, .Severity]) 
+            | @tsv' \
+          | column -t -s $'\t' || echo "Scan terminé avec vulnérabilités"
