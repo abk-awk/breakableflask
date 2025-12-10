@@ -1,0 +1,276 @@
+name: Pipeline for Vulnerability checking 
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  Dependances:
+    name: Vérification et installation des dépendances
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Vérifier que requirements.txt existe
+        run: |
+          if [ ! -f "requirements.txt" ]; then
+            echo "❌ requirements.txt manquant !"
+            exit 1
+          fi
+          echo "✅ requirements.txt trouvé"
+      
+      - name: Vérifier que requirements.txt n'est pas vide
+        run: |
+          if [ ! -s "requirements.txt" ]; then
+            echo "❌ requirements.txt est vide !"
+            exit 1
+          fi
+          echo "✅ requirements.txt non vide"
+      
+      - name: Tester l'installation des dépendances
+        run: |
+          pip install -r requirements.txt
+          echo "✅ Dépendances installables"
+
+  Dockerfile:
+    name: Vérification et construction Docker
+    runs-on: ubuntu-latest
+    needs: Dependances
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Vérifier que Dockerfile existe
+        run: |
+          if [ ! -f "Dockerfile" ]; then
+            echo "❌ Dockerfile manquant !"
+            exit 1
+          fi
+          echo "✅ Dockerfile trouvé"
+      
+      - name: Tester la construction Docker
+        run: |
+          docker build -t imgvulne:1.1 .
+          echo "✅ Dockerfile OK — image Docker construite"
+
+  Vulnerabilities:
+    name: Scan des vulnérabilités
+    runs-on: ubuntu-latest
+    needs: Dockerfile
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Installer jq et column pour formatage
+        run: sudo apt-get update && sudo apt-get install -y jq bsdmainutils
+      
+      - name: Scanner vulnérabilités des dépendances Python
+        id: scan-python
+        continue-on-error: true
+        run: |
+          echo "🔍 Scan des vulnérabilités dans requirements.txt"
+          echo "================================================"
+          
+          # Scan avec Trivy et sauvegarde du résultat
+          docker run --rm \
+            -v "$PWD":/project \
+            -v $HOME/.cache/trivy:/root/.cache/ \
+            aquasec/trivy:latest fs --format json --severity HIGH,CRITICAL /project/requirements.txt \
+          > python-scan.json
+          
+          # Extraire les vulnérabilités
+          VULN_COUNT=$(jq '[.Results[]?.Vulnerabilities[]?] | length' python-scan.json)
+          
+          echo "VULN_COUNT=$VULN_COUNT" >> $GITHUB_ENV
+          
+          if [ "$VULN_COUNT" -gt 0 ]; then
+            echo "⚠️  $VULN_COUNT vulnérabilités trouvées dans requirements.txt"
+            echo ""
+            echo "Détails des vulnérabilités :"
+            echo "----------------------------"
+            
+            jq -r '
+              ["PACKAGE","VERSION","VULNÉRABILITÉ","SÉVÉRITÉ","TITRE"],
+              (.Results[]?.Vulnerabilities[]? | 
+                [.PkgName, .InstalledVersion, .VulnerabilityID, .Severity, .Title]) 
+              | @tsv
+            ' python-scan.json | column -t -s $'\t'
+            
+            echo ""
+            echo "::warning::$VULN_COUNT vulnérabilités HIGH/CRITICAL trouvées dans requirements.txt"
+          else
+            echo "✅ Aucune vulnérabilité HIGH/CRITICAL trouvée dans requirements.txt"
+          fi
+      
+      - name: Scanner vulnérabilités de l'image Docker
+        id: scan-docker
+        continue-on-error: true
+        run: |
+          echo ""
+          echo "🔍 Scan des vulnérabilités dans l'image Docker imgvulne:1.1"
+          echo "=========================================================="
+          
+          # Scan avec Trivy
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$HOME/.cache/trivy":/root/.cache/ \
+            aquasec/trivy:latest image --format json --severity HIGH,CRITICAL imgvulne:1.1 \
+          > docker-scan.json
+          
+          # Compter les vulnérabilités
+          DOCKER_VULN_COUNT=$(jq '[.Results[]?.Vulnerabilities[]?] | length' docker-scan.json)
+          
+          echo "DOCKER_VULN_COUNT=$DOCKER_VULN_COUNT" >> $GITHUB_ENV
+          
+          if [ "$DOCKER_VULN_COUNT" -gt 0 ]; then
+            echo "⚠️  $DOCKER_VULN_COUNT vulnérabilités trouvées dans l'image Docker"
+            echo ""
+            echo "Détails des vulnérabilités :"
+            echo "----------------------------"
+            
+            jq -r '
+              ["TARGET","PACKAGE","VERSION","VULNÉRABILITÉ","SÉVÉRITÉ"],
+              (.Results[]? as $r | 
+                $r.Vulnerabilities[]? | 
+                [$r.Target, .PkgName, .InstalledVersion, .VulnerabilityID, .Severity]) 
+              | @tsv
+            ' docker-scan.json | column -t -s $'\t'
+            
+            echo ""
+            echo "::warning::$DOCKER_VULN_COUNT vulnérabilités HIGH/CRITICAL trouvées dans l'image Docker"
+          else
+            echo "✅ Aucune vulnérabilité HIGH/CRITICAL trouvée dans l'image Docker"
+          fi
+      
+      - name: Résumé des vulnérabilités
+        if: always()
+        run: |
+          echo ""
+          echo "╔══════════════════════════════════════════════════════╗"
+          echo "║        RÉSUMÉ DU SCAN DE VULNÉRABILITÉS             ║"
+          echo "╚══════════════════════════════════════════════════════╝"
+          echo ""
+          
+          TOTAL_VULN=$((${VULN_COUNT:-0} + ${DOCKER_VULN_COUNT:-0}))
+          
+          echo "📊 Vulnérabilités Python (requirements.txt) : ${VULN_COUNT:-0}"
+          echo "📊 Vulnérabilités Docker (image)            : ${DOCKER_VULN_COUNT:-0}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📊 TOTAL                                    : $TOTAL_VULN"
+          echo ""
+          
+          if [ "$TOTAL_VULN" -gt 0 ]; then
+            echo "⚠️  ACTION REQUISE : Des vulnérabilités ont été détectées !"
+            echo ""
+            echo "Recommandations :"
+            echo "  1. Examiner les vulnérabilités listées ci-dessus"
+            echo "  2. Mettre à jour les packages vulnérables"
+            echo "  3. Vérifier les CVE sur https://nvd.nist.gov/"
+            echo ""
+            echo "::error::$TOTAL_VULN vulnérabilités HIGH/CRITICAL détectées"
+            exit 1
+          else
+            echo "✅ Aucune vulnérabilité HIGH/CRITICAL détectée"
+            echo "✅ L'image est sécurisée"
+          fi
+      
+      - name: Uploader les rapports de scan
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: vulnerability-reports
+          path: |
+            python-scan.json
+            docker-scan.json
+          retention-days: 30
+      
+      - name: Créer un rapport Markdown
+        if: always()
+        run: |
+          cat > vulnerability-report.md << 'EOF'
+          # 🔒 Rapport de Scan de Vulnérabilités
+          
+          **Date:** $(date '+%Y-%m-%d %H:%M:%S')
+          **Branche:** ${{ github.ref_name }}
+          **Commit:** ${{ github.sha }}
+          
+          ---
+          
+          ## 📊 Résumé
+          
+          | Catégorie | Vulnérabilités HIGH/CRITICAL |
+          |-----------|------------------------------|
+          | Python (requirements.txt) | ${VULN_COUNT:-0} |
+          | Image Docker | ${DOCKER_VULN_COUNT:-0} |
+          | **TOTAL** | **$((${VULN_COUNT:-0} + ${DOCKER_VULN_COUNT:-0}))** |
+          
+          ---
+          
+          ## 🔍 Détails Python
+          
+          EOF
+          
+          if [ "${VULN_COUNT:-0}" -gt 0 ]; then
+            echo "### ⚠️ Vulnérabilités trouvées" >> vulnerability-report.md
+            echo "" >> vulnerability-report.md
+            jq -r '
+              .Results[]?.Vulnerabilities[]? | 
+              "- **\(.VulnerabilityID)** (\(.Severity)) - \(.PkgName) \(.InstalledVersion)\n  - \(.Title)\n  - Fix: \(.FixedVersion // "Non disponible")\n"
+            ' python-scan.json >> vulnerability-report.md
+          else
+            echo "✅ Aucune vulnérabilité détectée" >> vulnerability-report.md
+          fi
+          
+          cat >> vulnerability-report.md << 'EOF'
+          
+          ---
+          
+          ## 🐳 Détails Docker
+          
+          EOF
+          
+          if [ "${DOCKER_VULN_COUNT:-0}" -gt 0 ]; then
+            echo "### ⚠️ Vulnérabilités trouvées" >> vulnerability-report.md
+            echo "" >> vulnerability-report.md
+            jq -r '
+              .Results[]? | 
+              "#### \(.Target)\n" + 
+              (
+                .Vulnerabilities[]? | 
+                "- **\(.VulnerabilityID)** (\(.Severity)) - \(.PkgName) \(.InstalledVersion)\n  - \(.Title)\n  - Fix: \(.FixedVersion // "Non disponible")\n"
+              )
+            ' docker-scan.json >> vulnerability-report.md
+          else
+            echo "✅ Aucune vulnérabilité détectée" >> vulnerability-report.md
+          fi
+          
+          echo "" >> vulnerability-report.md
+          echo "---" >> vulnerability-report.md
+          echo "*Généré automatiquement par GitHub Actions*" >> vulnerability-report.md
+      
+      - name: Uploader le rapport Markdown
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: vulnerability-report-markdown
+          path: vulnerability-report.md
+          retention-days: 30
+      
+      - name: Commenter la PR avec le résumé
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('vulnerability-report.md', 'utf8');
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: report
+            });
