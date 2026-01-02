@@ -1,6 +1,6 @@
 cryptography==41.0
 psycopg2-binary==2.9
-pymysql==1.9.1
+pymysql==1.1.2
 pymssql==2.2.0
 oracledb==2.5.0
 
