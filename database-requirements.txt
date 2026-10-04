@@ -2,4 +2,4 @@ cryptography==2.1.4
 psycopg2-binary==2.6.2
 pymysql==0.6.7
 pymssql==2.1.1
-cx-Oracle==5.3
+cx-Oracle==5.4
